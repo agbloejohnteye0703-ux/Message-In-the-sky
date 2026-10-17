@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>A Message in the Sky</title>
+<style>
+:root{--bg:#10162b;--fg:#fff;--accent:#ffd36e}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+#start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:24px;text-align:center;background:linear-gradient(#10162b,#2b3a67);z-index:5}
+#start h1{margin:0;font-size:28px}
+#start p{margin:0;opacity:.85;max-width:320px;line-height:1.4}
+input,select,button{font:inherit;padding:12px 16px;border-radius:12px;border:0;width:260px}
+button{background:var(--accent);color:#222;font-weight:700}
+video,canvas{position:fixed;inset:0;width:100%;height:100%;object-fit:cover}
+#hud{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 12px) 16px 0;text-align:center;font-size:15px;text-shadow:0 1px 4px #000;z-index:3;pointer-events:none}
+#arrow{font-size:40px;display:inline-block;transition:transform .15s}
+</style></head><body>
+<div id="start">
+  <h1>☁️ A message in the sky</h1>
+  <p>Open this outdoors. Point your camera at the sky and look for the secret spot.</p>
+  <input id="name" type="hidden" value="Prudence">
+  <input id="dir" type="hidden" value="90">
+  <button id="go">Open the sky</button>
+</div>
+<video id="v" playsinline muted autoplay></video>
+<canvas id="c"></canvas>
+<div id="err" style="position:fixed;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom,0px) + 16px);z-index:4;text-align:center;background:rgba(0,0,0,.7);padding:10px;border-radius:12px;display:none;font-size:14px"></div>
+<div id="hud"><span id="arrow"></span><div id="status"></div></div>
+<script>
+const $=id=>document.getElementById(id);
+const qs=new URLSearchParams(location.search);
+if(qs.get('name'))$('name').value=qs.get('name');
+let heading=null,pitch=60,demo=false,target=90,nameTxt='';
+const v=$('v'),c=$('c'),ctx=c.getContext('2d');
+const T=document.createElement('canvas'),tx=T.getContext('2d');
+const M=document.createElement('canvas'),mx=M.getContext('2d',{willReadFrequently:true});
+const S=document.createElement('canvas'),sx=S.getContext('2d',{willReadFrequently:true});
+const MW=64,MH=64;M.width=MW;M.height=MH;S.width=MW;S.height=MH;
+const diff=(a,b)=>((a-b+540)%360)-180;
+
+$('go').onclick=async()=>{
+  initAudio();target=+$('dir').value;nameTxt=$('name').value.trim();
+  try{
+    if(typeof DeviceOrientationEvent!=='undefined'&&DeviceOrientationEvent.requestPermission){
+      await DeviceOrientationEvent.requestPermission();
+    }
+  }catch(e){}
+  addEventListener('deviceorientationabsolute',onOri,true);
+  addEventListener('deviceorientation',onOri,true);
+  try{
+    const s=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+    v.srcObject=s;
+  }catch(e){const el=$('err');el.style.display='block';el.textContent='Camera problem ('+(e&&e.name?e.name:'unknown')+'). Open this link directly in Safari or Chrome (not inside another app), allow camera access, then reload.';}
+  $('start').style.display='none';
+  setTimeout(()=>{if(heading===null){demo=true;$('status').textContent='No compass found. Drag left or right to look around.';}},1500);
+  requestAnimationFrame(loop);
+};
+function onOri(e){
+  if(e.webkitCompassHeading!=null)heading=e.webkitCompassHeading;
+  else if(e.alpha!=null&&(e.absolute||e.type==='deviceorientationabsolute'))heading=(360-e.alpha)%360;
+  if(e.beta!=null)pitch=e.beta;
+}
+let dragX=0,lx=null;
+addEventListener('pointerdown',e=>lx=e.clientX);
+addEventListener('pointermove',e=>{if(demo&&lx!=null){heading=((heading??0)+(lx-e.clientX)*.2+360)%360;lx=e.clientX}});
+addEventListener('pointerup',()=>lx=null);
+
+function cloudMask(){
+  sx.drawImage(v,0,0,MW,MH);
+  const d=sx.getImageData(0,0,MW,MH).data;
+  const o=mx.createImageData(MW,MH);let n=0;
+  for(let i=0;i<d.length;i+=4){
+    const r=d[i],g=d[i+1],b=d[i+2],mx_=Math.max(r,g,b),mn=Math.min(r,g,b),br=(r+g+b)/3;
+    const lowSat=(mx_-mn)<38&&b-r<28;
+    const bright=br>115;
+    const ok=lowSat&&bright;
+    o.data[i]=o.data[i+1]=o.data[i+2]=255;o.data[i+3]=ok?255:0;
+    if(ok)n++;
+  }
+  mx.putImageData(o,0,0);
+  return n/(MW*MH);
+}
+let AC,master,active=false,idx=0,timer,glow=0,sparks=[];
+// Happy Birthday melody in G: [semitones from G4, beats]
+const MEL=[[0,.75],[0,.25],[2,1],[0,1],[5,1],[4,2],[0,.75],[0,.25],[2,1],[0,1],[7,1],[5,2],[0,.75],[0,.25],[12,1],[9,1],[5,1],[4,1],[2,2],[11,.75],[11,.25],[9,1],[5,1],[7,1],[5,2]];
+function initAudio(){
+  try{
+    AC=new (window.AudioContext||window.webkitAudioContext)();
+    master=AC.createGain();master.gain.value=0;
+    const len=AC.sampleRate*3,buf=AC.createBuffer(2,len,AC.sampleRate);
+    for(let ch=0;ch<2;ch++){const d=buf.getChannelData(ch);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.5);}
+    const cv=AC.createConvolver();cv.buffer=buf;
+    const dry=AC.createGain();dry.gain.value=.45;
+    const wet=AC.createGain();wet.gain.value=1;
+    master.connect(dry);dry.connect(AC.destination);
+    master.connect(cv);cv.connect(wet);wet.connect(AC.destination);
+    AC.resume();
+  }catch(e){AC=null;}
+}
+function voice(freq,dur,vol){
+  const t=AC.currentTime,end=t+dur+.5;
+  const o=AC.createOscillator();o.type='sawtooth';o.frequency.value=freq;o.detune.value=(Math.random()-.5)*16;
+  const l=AC.createOscillator();l.frequency.value=5+Math.random();
+  const lg=AC.createGain();lg.gain.value=freq*.007;l.connect(lg);lg.connect(o.frequency);
+  const out=AC.createGain();out.gain.setValueAtTime(0,t);
+  out.gain.linearRampToValueAtTime(vol,t+.15);
+  out.gain.setTargetAtTime(0,t+dur,.18);
+  [[800,1],[1150,.5],[2900,.25]].forEach(([f,g])=>{
+    const bp=AC.createBiquadFilter();bp.type='bandpass';bp.frequency.value=f;bp.Q.value=7;
+    const gn=AC.createGain();gn.gain.value=g*2.2;
+    o.connect(bp);bp.connect(gn);gn.connect(out);
+  });
+  out.connect(master);
+  o.start(t);l.start(t);o.stop(end);l.stop(end);
+}
+function playNote(){
+  if(!active||!AC)return;
+  const [s,d]=MEL[idx%MEL.length];
+  const f=392*Math.pow(2,s/12),dur=d*.62;
+  voice(f,dur,.16);voice(f/2,dur,.2);voice(f*Math.pow(2,-5/12),dur,.12);voice(f*2,dur,.04);
+  idx++;
+  let wait=dur*1000;
+  if(idx%MEL.length===0)wait+=2800;
+  timer=setTimeout(playNote,wait);
+}
+function setChoir(on){
+  if(!AC)return;
+  if(on&&!active){active=true;AC.resume();master.gain.setTargetAtTime(1,AC.currentTime,.6);playNote();}
+  else if(!on&&active){active=false;clearTimeout(timer);master.gain.setTargetAtTime(0,AC.currentTime,.4);}
+}
+let conf=[],lastBurst=0;
+function celebrate(x,y){
+  lastBurst=Date.now();
+  const cols=['#ff5d8f','#ffd36e','#6ee7ff','#9b8cff','#7dffb0','#ffffff'];
+  for(let i=0;i<150;i++){
+    const a=Math.random()*Math.PI*2,sp=(4+Math.random()*12)*devicePixelRatio;
+    conf.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-6*devicePixelRatio,rot:Math.random()*6,vr:(Math.random()-.5)*.4,w:(6+Math.random()*8)*devicePixelRatio,h:(3+Math.random()*5)*devicePixelRatio,c:cols[i%cols.length]});
+  }
+  if(!AC)return;
+  try{
+    const t=AC.currentTime;
+    // party pops
+    for(let k=0;k<5;k++){
+      const nb=AC.createBuffer(1,AC.sampleRate*.25,AC.sampleRate),d=nb.getChannelData(0);
+      for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,4);
+      const s=AC.createBufferSource();s.buffer=nb;
+      const hp=AC.createBiquadFilter();hp.type='highpass';hp.frequency.value=900;
+      const g=AC.createGain();g.gain.value=.5;
+      s.connect(hp);hp.connect(g);g.connect(AC.destination);s.start(t+k*.13);
+    }
+    // sparkling chime run
+    [784,988,1175,1568,1976,2349].forEach((f,i)=>{
+      const o=AC.createOscillator();o.type='triangle';o.frequency.value=f;
+      const g=AC.createGain();const st=t+.1+i*.09;
+      g.gain.setValueAtTime(0,st);g.gain.linearRampToValueAtTime(.18,st+.01);g.gain.exponentialRampToValueAtTime(.001,st+1.2);
+      o.connect(g);g.connect(AC.destination);o.start(st);o.stop(st+1.3);
+    });
+    // party horn
+    const h=AC.createOscillator();h.type='sawtooth';
+    h.frequency.setValueAtTime(350,t+.7);h.frequency.linearRampToValueAtTime(620,t+1.1);
+    const hg=AC.createGain();hg.gain.setValueAtTime(0,t+.7);hg.gain.linearRampToValueAtTime(.12,t+.75);hg.gain.linearRampToValueAtTime(0,t+1.2);
+    h.connect(hg);hg.connect(AC.destination);h.start(t+.7);h.stop(t+1.25);
+  }catch(e){}
+}
+function loop(){
+  const W=c.width=innerWidth*devicePixelRatio,H=c.height=innerHeight*devicePixelRatio;
+  ctx.clearRect(0,0,W,H);
+  let cover=0;
+  if(v.readyState>=2)cover=cloudMask();
+  const hd=heading==null?0:diff(target,heading);          // degrees to target (+ = turn right)
+  const elev=demo?35:pitch-90;                             // camera elevation angle
+  const ppd=W/50;                                          // pixels per degree
+  const x=W/2+hd*ppd;
+  const y=H/2+(38-elev)*ppd;
+  const near=Math.abs(hd)<45;
+  const inView=Math.abs(hd)<30&&cover>.04;
+  setChoir(inView);
+  if(inView&&Date.now()-lastBurst>8000)celebrate(x,y);
+  glow+=((inView?1:0)-glow)*.04;
+  // message layer
+  T.width=W;T.height=H;
+  tx.clearRect(0,0,W,H);
+  const fs=W*.2;
+  tx.textAlign='center';tx.textBaseline='middle';
+  tx.font=`800 ${fs}px "Brush Script MT","Segoe Script",cursive,sans-serif`;
+  tx.fillStyle='#fff';tx.shadowColor='rgba(255,200,230,.9)';tx.shadowBlur=fs*.2;
+  const lines=['Happy','Birthday'];if(nameTxt)lines.push(nameTxt+' 🎂');
+  lines.forEach((t,i)=>tx.fillText(t,x,y+(i-(lines.length-1)/2)*fs*1.05));
+  // heavenly glow + rising sparkles
+  if(glow>.01){
+    const g=ctx.createRadialGradient(x,y,0,x,y,W*.8);
+    g.addColorStop(0,`rgba(255,240,190,${.5*glow})`);g.addColorStop(1,'rgba(255,240,190,0)');
+    ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+    ctx.save();ctx.globalAlpha=.12*glow;ctx.fillStyle='#fff6d0';
+    for(let i=-3;i<=3;i++){ctx.beginPath();ctx.moveTo(x+i*8,0);ctx.lineTo(x+i*W*.12-W*.05,H);ctx.lineTo(x+i*W*.12+W*.05,H);ctx.closePath();ctx.fill();}
+    ctx.restore();
+    if(sparks.length<45)sparks.push({x:x+(Math.random()-.5)*W*.9,y:y+H*.15,v:.6+Math.random()*1.6,r:1.5+Math.random()*3.5,a:1});
+  }
+  sparks=sparks.filter(p=>p.a>0);
+  sparks.forEach(p=>{p.y-=p.v*devicePixelRatio;p.a-=.008;ctx.globalAlpha=Math.max(0,p.a)*Math.max(glow,.2);ctx.fillStyle='#fff3b0';ctx.beginPath();ctx.arc(p.x,p.y,p.r*devicePixelRatio,0,7);ctx.fill();});
+  ctx.globalAlpha=1;
+  conf=conf.filter(p=>p.y<H+60&&p.x>-100&&p.x<W+100);
+  conf.forEach(p=>{p.vy+=.18*devicePixelRatio;p.vx*=.99;p.x+=p.vx;p.y+=p.vy;p.rot+=p.vr;
+    ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.rot);ctx.fillStyle=p.c;ctx.fillRect(-p.w/2,-p.h/2,p.w,p.h);ctx.restore();});
+  // ghost hint
+  ctx.globalAlpha=.10;ctx.drawImage(T,0,0);ctx.globalAlpha=1;
+  // clip message to clouds
+  ctx.save();
+  tx.globalCompositeOperation='destination-in';tx.imageSmoothingEnabled=true;
+  tx.filter='blur(6px)';tx.drawImage(M,0,0,W,H);tx.filter='none';tx.globalCompositeOperation='source-over';
+  const pulse=.85+.15*Math.sin(Date.now()/400);
+  ctx.globalAlpha=pulse;ctx.drawImage(T,0,0);ctx.restore();
+  // HUD
+  const ar=$('arrow'),st=$('status');
+  if(heading!=null||demo){
+    if(!near){ar.textContent='➤';ar.style.transform=`rotate(${hd>0?0:180}deg)`;if(!demo||st.textContent.startsWith('No compass')===false)st.textContent='Keep turning… something is hiding in the sky ✨';}
+    else{ar.textContent='';st.textContent=cover<.04?'Aim at a cloud ☁️':'👼 Listen…';}
+  }
+  requestAnimationFrame(loop);
+}
+</script></body></html>
