@@ -17,7 +17,7 @@ video,canvas{position:fixed;inset:0;width:100%;height:100%;object-fit:cover}
 </style></head><body>
 <div id="start">
   <h1>☁️ A message in the sky</h1>
-  <p>Open this outdoors. Point your camera at the sky and look for the secret spot.</p>
+  <p>Open this outdoors. Point your camera at the sky and look for a cloud.</p>
   <input id="name" type="hidden" value="Prudence">
   <input id="dir" type="hidden" value="90">
   <button id="go">Open the sky</button>
@@ -25,12 +25,13 @@ video,canvas{position:fixed;inset:0;width:100%;height:100%;object-fit:cover}
 <video id="v" playsinline muted autoplay></video>
 <canvas id="c"></canvas>
 <div id="err" style="position:fixed;left:12px;right:12px;bottom:calc(env(safe-area-inset-bottom,0px) + 16px);z-index:4;text-align:center;background:rgba(0,0,0,.7);padding:10px;border-radius:12px;display:none;font-size:14px"></div>
+<div id="lyr" style="position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 40px);text-align:center;font-size:24px;font-weight:700;text-shadow:0 2px 6px #000;z-index:3;pointer-events:none"></div>
 <div id="hud"><span id="arrow"></span><div id="status"></div></div>
 <script>
 const $=id=>document.getElementById(id);
 const qs=new URLSearchParams(location.search);
 if(qs.get('name'))$('name').value=qs.get('name');
-let heading=null,pitch=60,demo=false,target=90,nameTxt='';
+let gotOri=false,heading=null,pitch=60,demo=false,target=90,nameTxt='';
 const v=$('v'),c=$('c'),ctx=c.getContext('2d');
 const T=document.createElement('canvas'),tx=T.getContext('2d');
 const M=document.createElement('canvas'),mx=M.getContext('2d',{willReadFrequently:true});
@@ -52,13 +53,13 @@ $('go').onclick=async()=>{
     v.srcObject=s;
   }catch(e){const el=$('err');el.style.display='block';el.textContent='Camera problem ('+(e&&e.name?e.name:'unknown')+'). Open this link directly in Safari or Chrome (not inside another app), allow camera access, then reload.';}
   $('start').style.display='none';
-  setTimeout(()=>{if(heading===null){demo=true;$('status').textContent='No compass found. Drag left or right to look around.';}},1500);
+  setTimeout(()=>{if(!gotOri){demo=true;$('status').textContent='No motion sensor found, showing the message anyway.';}},1500);
   requestAnimationFrame(loop);
 };
 function onOri(e){
   if(e.webkitCompassHeading!=null)heading=e.webkitCompassHeading;
   else if(e.alpha!=null&&(e.absolute||e.type==='deviceorientationabsolute'))heading=(360-e.alpha)%360;
-  if(e.beta!=null)pitch=e.beta;
+  if(e.beta!=null){pitch=e.beta;gotOri=true;}
 }
 let dragX=0,lx=null;
 addEventListener('pointerdown',e=>lx=e.clientX);
@@ -97,36 +98,35 @@ function initAudio(){
     AC.resume();
   }catch(e){AC=null;}
 }
-function voice(freq,dur,vol){
-  const t=AC.currentTime,end=t+dur+.5;
-  const o=AC.createOscillator();o.type='sawtooth';o.frequency.value=freq;o.detune.value=(Math.random()-.5)*16;
-  const l=AC.createOscillator();l.frequency.value=5+Math.random();
-  const lg=AC.createGain();lg.gain.value=freq*.007;l.connect(lg);lg.connect(o.frequency);
-  const out=AC.createGain();out.gain.setValueAtTime(0,t);
-  out.gain.linearRampToValueAtTime(vol,t+.15);
-  out.gain.setTargetAtTime(0,t+dur,.18);
-  [[800,1],[1150,.5],[2900,.25]].forEach(([f,g])=>{
-    const bp=AC.createBiquadFilter();bp.type='bandpass';bp.frequency.value=f;bp.Q.value=7;
-    const gn=AC.createGain();gn.gain.value=g*2.2;
-    o.connect(bp);bp.connect(gn);gn.connect(out);
+const CNT=[6,6,7,6];
+const lineTxt=k=>['Happy birthday to you','Happy birthday to you','Happy birthday dear '+nameTxt,'Happy birthday to you'][k];
+function lineOf(i){let a=0;for(let k=0;k<4;k++){a+=CNT[k];if(i<a)return k;}return 3;}
+function bell(f,dur){
+  const t=AC.currentTime;
+  [[1,.5],[2,.22],[3,.1],[4.2,.04]].forEach(([m,v])=>{
+    const o=AC.createOscillator();o.type='sine';o.frequency.value=f*m;
+    const g=AC.createGain();g.gain.setValueAtTime(0,t);g.gain.linearRampToValueAtTime(v,t+.006);g.gain.exponentialRampToValueAtTime(.001,t+dur+.8);
+    o.connect(g);g.connect(master);o.start(t);o.stop(t+dur+.9);
   });
-  out.connect(master);
-  o.start(t);l.start(t);o.stop(end);l.stop(end);
+  const b=AC.createOscillator();b.type='triangle';b.frequency.value=f/2;
+  const bg=AC.createGain();bg.gain.setValueAtTime(0,t);bg.gain.linearRampToValueAtTime(.18,t+.02);bg.gain.exponentialRampToValueAtTime(.001,t+dur+.4);
+  b.connect(bg);bg.connect(master);b.start(t);b.stop(t+dur+.5);
 }
 function playNote(){
   if(!active||!AC)return;
-  const [s,d]=MEL[idx%MEL.length];
-  const f=392*Math.pow(2,s/12),dur=d*.62;
-  voice(f,dur,.16);voice(f/2,dur,.2);voice(f*Math.pow(2,-5/12),dur,.12);voice(f*2,dur,.04);
+  const n=idx%MEL.length,[s,d]=MEL[n];
+  const f=392*Math.pow(2,s/12),dur=d*.45;
+  bell(f,dur*1.5);
+  $('lyr').textContent='\ud83c\udfb5 '+lineTxt(lineOf(n));
   idx++;
   let wait=dur*1000;
-  if(idx%MEL.length===0)wait+=2800;
+  if(idx%MEL.length===0)wait+=2000;
   timer=setTimeout(playNote,wait);
 }
 function setChoir(on){
   if(!AC)return;
-  if(on&&!active){active=true;AC.resume();master.gain.setTargetAtTime(1,AC.currentTime,.6);playNote();}
-  else if(!on&&active){active=false;clearTimeout(timer);master.gain.setTargetAtTime(0,AC.currentTime,.4);}
+  if(on&&!active){active=true;AC.resume();master.gain.setTargetAtTime(1,AC.currentTime,.1);playNote();}
+  else if(!on&&active){active=false;clearTimeout(timer);master.gain.setTargetAtTime(0,AC.currentTime,.2);$('lyr').textContent='';}
 }
 let conf=[],lastBurst=0;
 function celebrate(x,y){
@@ -170,10 +170,10 @@ function loop(){
   const hd=heading==null?0:diff(target,heading);          // degrees to target (+ = turn right)
   const elev=demo?35:pitch-90;                             // camera elevation angle
   const ppd=W/50;                                          // pixels per degree
-  const x=W/2+hd*ppd;
-  const y=H/2+(38-elev)*ppd;
-  const near=Math.abs(hd)<45;
-  const inView=Math.abs(hd)<30&&cover>.04;
+  const x=W/2;
+  const y=H*.42;
+  const up=demo||elev>12;
+  const inView=up&&cover>.04;
   setChoir(inView);
   if(inView&&Date.now()-lastBurst>8000)celebrate(x,y);
   glow+=((inView?1:0)-glow)*.04;
@@ -212,10 +212,8 @@ function loop(){
   ctx.globalAlpha=pulse;ctx.drawImage(T,0,0);ctx.restore();
   // HUD
   const ar=$('arrow'),st=$('status');
-  if(heading!=null||demo){
-    if(!near){ar.textContent='➤';ar.style.transform=`rotate(${hd>0?0:180}deg)`;if(!demo||st.textContent.startsWith('No compass')===false)st.textContent='Keep turning… something is hiding in the sky ✨';}
-    else{ar.textContent='';st.textContent=cover<.04?'Aim at a cloud ☁️':'👼 Listen…';}
-  }
+  if(!up){ar.textContent='\u2b06\ufe0f';st.textContent='Point your camera up at the sky \u2601\ufe0f';}
+  else{ar.textContent='';st.textContent=cover<.04?'Aim at a cloud \u2601\ufe0f':'';}
   requestAnimationFrame(loop);
 }
 </script></body></html>
